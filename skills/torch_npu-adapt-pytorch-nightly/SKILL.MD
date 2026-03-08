@@ -6,36 +6,49 @@
 
 - **触发方式**：每天 UTC 02:00（北京时间 10:00）自动触发，或手动触发
 - **运行环境**：GitHub Actions 免费 x86 runner（`ubuntu-22.04`）
+- **Python 版本**：3.11（通过 `actions/setup-python@v5` 安装）
 - **PyTorch 版本**：PyTorch 主干每日 nightly 构建（CPU 版）
 - **CANN 依赖**：无需安装 CANN，使用仓库内置的桩库（`third_party/acl/libs/build_stub.sh`）
 
 ## 构建流程
 
-1. 安装 PyTorch nightly（从 `download.pytorch.org/whl/nightly/cpu`）
-2. 克隆 `Ascend/pytorch`（含 `op-plugin` 子模块）
-3. 按序应用 `patches/` 目录下所有兼容性 patch
-4. 编译 CANN 桩库（`build_stub.sh`，仅需 GCC）
-5. 执行 `python setup.py build bdist_wheel`
-6. 上传构建日志和生成的 wheel 包
+1. 安装系统依赖（cmake, ninja-build, gcc, g++, git, patchelf, ccache）
+2. 安装 Python 3.11
+3. 恢复 ccache 缓存
+4. 安装 PyTorch nightly（从 `download.pytorch.org/whl/nightly/cpu`）
+5. 克隆 `Ascend/pytorch`（`--depth=1 --recurse-submodules`）
+6. 安装 Python 构建依赖（pyyaml, setuptools, auditwheel）
+7. 按序应用 `patches/` 目录下所有兼容性 patch
+8. 执行 `python setup.py build bdist_wheel`
+9. 保存 ccache 缓存
+10. 上传构建日志和生成的 wheel 包
 
-## 当前 CI 策略（2026-03-08 更新）
+## 当前 CI 策略
 
 - 默认启用 torchair：`DISABLE_INSTALL_TORCHAIR=FALSE`
 - 不再强制禁用 RPC：不设置 `DISABLE_RPC_FRAMEWORK=TRUE`
-- 启用 `ccache`：构建前 `restore`，构建后 `save`
-- Step Summary 额外输出 `ccache` 命中状态与命中率
+- 启用 `ccache`：构建前 `cache/restore`，构建后 `cache/save`
+- ccache key 格式：`ccache-{os}-py{python_version}-{ref_name}-{run_id}`
+- Step Summary 输出 ccache 命中状态与命中率
+- Patch 应用失败不中断流程，记录到 `failed` 输出
 
 ## 查看结果
 
 - [Actions 页面](../../actions/workflows/nightly-build.yml) 查看每次构建状态
-- 每次运行的 Step Summary 包含 PyTorch 版本、Ascend/pytorch commit、已应用 patch 列表和构建结果
-- 构建失败时可下载 `build-log` artifact 查看详细编译错误
+- 每次运行的 Step Summary 包含：
+  - 构建时间
+  - PyTorch Nightly 版本
+  - Ascend/pytorch commit（带链接）
+  - 已应用 patch 列表
+  - ccache 命中状态与命中率
+  - 构建结果
+- 构建失败时可下载 `build-log-{run_number}` artifact 查看详细编译错误
 
 ### 结果判读要点
 
 - `Build torch_npu wheel` 成功且出现 `Build succeeded: dist/*.whl`，说明核心编译成功。
 - 如果同一 step 最后报 `Unable to process file command 'output'` / `Invalid format`，通常是 workflow 输出写法错误（`$GITHUB_OUTPUT` 格式）而非编译错误。
-- `ccache` 首次冷启动命中率低属正常；第二次开始命中率应显著提升（本仓库实测从 `0.16%` 提升到 `99.76%`）。
+- `ccache` 首次冷启动命中率低属正常；第二次开始命中率应显著提升。
 
 ## 手动触发
 
@@ -73,7 +86,7 @@ CI 变红后的第一步。执行内容：
 2. `gh run view --log-failed` 拉取失败日志
 3. 过滤 `error:`、`make[2]`、`Traceback` 等关键行
 4. 读取受影响的 Ascend/pytorch 源文件
-5. 在 PyTorch nightly 头文件（`/usr/local/lib/python3.12/dist-packages/torch/include/`）中查找变更后的 API 定义
+5. 在 PyTorch nightly 头文件（`/usr/local/lib/python3.11/dist-packages/torch/include/`）中查找变更后的 API 定义
 6. 输出结构化报告：已生效 patch、错误摘要、根本原因、受影响范围、建议修复方向
 
 ```
@@ -82,7 +95,7 @@ CI 变红后的第一步。执行内容：
 
 **关键观察**：构建运行时长比上次更长 → 前序 patch 已生效，本次暴露新问题。
 
-**新增观察（重要）**：先区分“真实编译失败”与“CI 脚本失败”：
+**新增观察（重要）**：先区分"真实编译失败"与"CI 脚本失败"：
 - 编译失败：`error:` / `make[2]: ***` / `FAILED` 等 C/C++ 错误
 - 脚本失败：`Unable to process file command 'output'`、`Invalid format`、`set-output`/`GITHUB_OUTPUT` 相关报错
 
@@ -104,7 +117,7 @@ CI 变红后的第一步。执行内容：
 
 执行内容：
 
-1. 确认本地克隆（`/root/ascend_pytorch_tmp`）可用
+1. 确认本地克隆（`/tmp/ascend_pytorch` 或类似路径）可用
 2. 对比新旧 API，按最小改动原则修改受影响源文件
 3. `git diff <文件> > patches/NNNN-fix-<模块>-<描述>.patch` 生成 patch
 4. 提交 patch + issue 文档并 push
@@ -141,13 +154,55 @@ CI 变红后的第一步。执行内容：
 
 ---
 
-## ccache 经验沉淀
+## Workflow 最佳实践
 
-- 在本仓库场景下，`ccache` 对重复构建有效，建议保留。
-- 推荐至少保留以下环境变量：
-  - `CC="ccache gcc"`
-  - `CXX="ccache g++"`
-  - `CCACHE_DIR=~/.ccache`
-  - `CCACHE_MAXSIZE=2G`
-- 不要把多行文本直接写入 `$GITHUB_OUTPUT`（会触发格式错误并导致 step 失败）。
-  - 建议输出单行指标（如 `hit_rate=99.76 %`）。
+### ccache 配置
+
+```bash
+export CC="ccache gcc"
+export CXX="ccache g++"
+export CCACHE_BASEDIR="${PWD}"
+export CCACHE_DIR="${HOME}/.ccache"
+export CCACHE_COMPRESS=1
+export CCACHE_MAXSIZE=2G
+```
+
+### Patch 应用方式
+
+```bash
+# 正确方式：使用 --directory 参数
+git apply --directory=ascend_pytorch "$patch"
+
+# 错误方式：cd 后再 apply（会导致路径解析错误）
+cd ascend_pytorch && git apply "$patch"  # ❌
+```
+
+### GITHUB_OUTPUT 写法
+
+```bash
+# 正确：单行值
+echo "version=${TORCH_VER}" >> $GITHUB_OUTPUT
+
+# 错误：多行值会触发格式错误
+echo "logs=$(cat build.log)" >> $GITHUB_OUTPUT  # ❌
+```
+
+### 缓存 Key 策略
+
+```yaml
+key: ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-${{ github.run_id }}
+restore-keys: |
+  ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-
+  ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
+```
+
+使用 `cache/restore` + `cache/save` 分离模式，确保 `always()` 时也能保存缓存。
+
+---
+
+## 相关文件
+
+- `AGENTS.md` - 项目级别的 Agent 指导文档
+- `.github/workflows/nightly-build.yml` - CI workflow 定义
+- `patches/` - 兼容性 patch 存放目录
+- `issues/` - 问题分析记录目录
