@@ -53,16 +53,16 @@ jobs:
       
       - name: Apply patches
         run: |
-          cd ascend_pytorch
           PATCHES_DIR="${{ github.workspace }}/patches"
           if [ -d "$PATCHES_DIR" ]; then
             for patch in $(ls -1v "$PATCHES_DIR"/*.patch 2>/dev/null); do
               echo "Applying patch: $(basename $patch)"
-              git apply "$patch" || {
-                echo "Failed to apply patch: $(basename $patch)"
+              if git apply --directory=ascend_pytorch "$patch"; then
+                echo "  ✅ OK"
+              else
+                echo "  ❌ FAILED (may already be merged upstream)"
                 exit 1
-              }
-              echo "$(basename $patch)" >> $GITHUB_OUTPUT
+              fi
             done
           else
             echo "No patches directory found"
