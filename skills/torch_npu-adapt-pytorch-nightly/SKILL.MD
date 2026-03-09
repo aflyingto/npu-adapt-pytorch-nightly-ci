@@ -64,9 +64,28 @@
 
 - 缓存路径：`~/.ccache`
 - Key 格式：`ccache-{os}-py{python_version}-{ref_name}-{run_id}`
-- `restore-keys`（按优先级）：
-  - `ccache-{os}-py{python_version}-{ref_name}-`
-  - `ccache-{os}-py{python_version}-`
+- `restore-keys`（按优先级排序，从高到低）：
+  1. `ccache-{os}-py{python_version}-{ref_name}-` - 同分支最新缓存
+  2. `ccache-{os}-py{python_version}-` - 同 Python 版本最新缓存
+  3. `ccache-{os}-` - 同操作系统最新缓存
+
+**设计原理**：
+- 第一级：优先使用同分支的缓存，代码差异最小
+- 第二级：其次使用同 Python 版本的缓存，ABI 兼容
+- 第三级：最后使用同操作系统的缓存，作为兜底
+
+**示例配置**：
+```yaml
+- name: Setup ccache
+  uses: actions/cache@v4
+  with:
+    path: ~/.ccache
+    key: ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-${{ github.run_id }}
+    restore-keys: |
+      ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-
+      ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
+      ccache-${{ runner.os }}-
+```
 
 ### 配置步骤
 
