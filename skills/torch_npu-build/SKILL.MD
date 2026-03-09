@@ -1,4 +1,4 @@
-# build_skills.md
+# torch_npu-build
 
 目标：仅根据本文件，自动生成可运行的 `.github/workflows/nightly-build.yml`，用于构建 `Ascend/pytorch` 的 wheel 包。使用稳定版本的pytorch；
 
