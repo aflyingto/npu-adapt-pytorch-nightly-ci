@@ -1,4 +1,4 @@
-name: Ascend/pytorch Nightly Build Validation
+name: Ascend/pytorch Nightly Build Validation - Claude
 
 on:
   schedule:
