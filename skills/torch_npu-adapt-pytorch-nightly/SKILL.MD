@@ -43,7 +43,10 @@
 11. 显示 ccache 统计（`if: always()`）
 12. 上传构建日志 artifact（`if: always()`）
 13. 上传 wheel artifact（仅成功时）
-14. 输出构建 summary
+14. 输出构建 summary：
+    - 构建信息表格
+    - **兼容性问题分析报告**（从 `issues/` 目录提取）
+    - 构建结果
 
 ## 4. ccache 规则
 
@@ -116,6 +119,8 @@ echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
 ## 7. Summary 规则
 
+### 构建信息表格
+
 - 使用表格格式输出构建信息：
   - 表头：`| 项目 | 详情 |`
   - 包含：构建时间、PyTorch Nightly 版本、Ascend/pytorch Commit（带链接）、Commit 时间、已应用 Patch、ccache 命中、ccache 命中率、构建结果
@@ -124,6 +129,44 @@ echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
   - 失败：`❌ FAILED`
 - 成功时列出 wheel 文件
 - 失败时提示查看 build-log artifact
+
+### 兼容性问题分析报告
+
+**必须**在 Summary 中展示 `issues/` 目录下的兼容性问题分析报告。
+
+#### 实现方式
+
+```bash
+# 读取 issues 目录下的所有 .md 文件并追加到 summary
+if [ -d "issues" ]; then
+  echo "## 兼容性问题分析报告" >> $GITHUB_STEP_SUMMARY
+  echo "" >> $GITHUB_STEP_SUMMARY
+  for issue in issues/*.md; do
+    [ -f "$issue" ] || continue
+    # 提取文件内容（跳过 YAML front matter 如果有）
+    echo "### $(basename "$issue" .md)" >> $GITHUB_STEP_SUMMARY
+    echo "" >> $GITHUB_STEP_SUMMARY
+    # 提取关键信息：问题描述、根本原因、修复方案
+    sed -n '/^## 问题描述/,/^## /p' "$issue" | head -n -1 >> $GITHUB_STEP_SUMMARY
+    sed -n '/^## 根本原因分析/,/^## /p' "$issue" | head -n -1 >> $GITHUB_STEP_SUMMARY
+    sed -n '/^## 修复方案/,/^## /p' "$issue" | head -n -1 >> $GITHUB_STEP_SUMMARY
+    echo "" >> $GITHUB_STEP_SUMMARY
+    echo "---" >> $GITHUB_STEP_SUMMARY
+    echo "" >> $GITHUB_STEP_SUMMARY
+  done
+fi
+```
+
+#### 报告内容要求
+
+每个 issue 报告应包含以下章节（按顺序）：
+1. **问题描述**：简述编译失败现象
+2. **根本原因分析**：PyTorch API 变更详情
+3. **修复方案**：对应 patch 的核心改动
+
+#### 输出位置
+
+兼容性问题报告位于构建信息表格之后、构建结果之前。
 
 ## 8. 关键防坑（必须遵守）
 
@@ -164,7 +207,7 @@ echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
 ## 10. 推荐生成提示词（给其他模型）
 
-"请严格按 `SKILL.MD` 生成 `.github/workflows/nightly-build.yml`。要求：按文档顺序组织 step，使用单一 `actions/cache@v4` 设置 ccache，使用 `$GITHUB_ENV` 设置环境变量，克隆 Ascend/pytorch master 分支，应用 `patches/` 目录下的兼容性 patch，设置 `DISABLE_INSTALL_TORCHAIR=FALSE`，ccache 统计作为独立 step 输出到 step summary（代码块格式），使用表格格式输出构建信息。生成后输出完整 YAML。"
+"请严格按 `SKILL.MD` 生成 `.github/workflows/nightly-build.yml`。要求：按文档顺序组织 step，使用单一 `actions/cache@v4` 设置 ccache，使用 `$GITHUB_ENV` 设置环境变量，克隆 Ascend/pytorch master 分支，应用 `patches/` 目录下的兼容性 patch，设置 `DISABLE_INSTALL_TORCHAIR=FALSE`，ccache 统计作为独立 step 输出到 step summary（代码块格式），使用表格格式输出构建信息，**必须**在 Summary 中展示 `issues/` 目录下的兼容性问题分析报告（提取问题描述、根本原因分析、修复方案三个章节）。生成后输出完整 YAML。"
 
 ---
 
