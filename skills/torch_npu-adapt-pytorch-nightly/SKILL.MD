@@ -1,180 +1,302 @@
-# pytorch-npu CI
+# pytorch-npu CI Skill
 
-每日自动验证 [Ascend/pytorch](https://github.com/Ascend/pytorch) 在 PyTorch 主干最新 nightly 版本下的编译兼容性。
+本 Skill 用于生成和管理 Ascend/pytorch 与 PyTorch nightly 版本的兼容性验证 CI。
 
-## 工作原理
+## 快速生成 Workflow
 
-- **触发方式**：每天 UTC 02:00（北京时间 10:00）自动触发，或手动触发
-- **运行环境**：GitHub Actions 免费 x86 runner（`ubuntu-22.04`）
-- **Python 版本**：3.11（通过 `actions/setup-python@v5` 安装）
-- **PyTorch 版本**：PyTorch 主干每日 nightly 构建（CPU 版）
-- **CANN 依赖**：无需安装 CANN，使用仓库内置的桩库（`third_party/acl/libs/build_stub.sh`）
+当需要创建或更新 `.github/workflows/nightly-build.yml` 时，直接使用以下完整模板：
 
-## 构建流程
+### 完整 Workflow 模板
 
-1. 安装系统依赖（cmake, ninja-build, gcc, g++, git, patchelf, ccache）
-2. 安装 Python 3.11
-3. 恢复 ccache 缓存
-4. 安装 PyTorch nightly（从 `download.pytorch.org/whl/nightly/cpu`）
-5. 克隆 `Ascend/pytorch`（`--depth=1 --recurse-submodules`）
-6. 安装 Python 构建依赖（pyyaml, setuptools, auditwheel）
-7. 按序应用 `patches/` 目录下所有兼容性 patch
-8. 执行 `python setup.py build bdist_wheel`
-9. 保存 ccache 缓存
-10. 上传构建日志和生成的 wheel 包
+```yaml
+name: Ascend/pytorch Nightly Build Validation
 
-## 当前 CI 策略
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 每天 UTC 02:00（北京时间 10:00）
+  workflow_dispatch:
+    inputs:
+      torch_nightly_date:
+        description: 'PyTorch nightly 日期 (格式: YYYYMMDD，留空使用最新版)'
+        required: false
+        default: ''
+  push:
+    paths:
+      - '.github/workflows/nightly-build.yml'
+      - 'patches/**'
+      - 'AGENTS.md'
 
-- 默认启用 torchair：`DISABLE_INSTALL_TORCHAIR=FALSE`
-- 不再强制禁用 RPC：不设置 `DISABLE_RPC_FRAMEWORK=TRUE`
-- 启用 `ccache`：构建前 `cache/restore`，构建后 `cache/save`
-- ccache key 格式：`ccache-{os}-py{python_version}-{ref_name}-{run_id}`
-- Step Summary 输出 ccache 命中状态与命中率
-- Patch 应用失败不中断流程，记录到 `failed` 输出
+env:
+  PYTHON_VERSION: '3.11'
 
-## 查看结果
+jobs:
+  build:
+    name: Build torch_npu (x86, PyTorch nightly)
+    runs-on: ubuntu-22.04
 
-- [Actions 页面](../../actions/workflows/nightly-build.yml) 查看每次构建状态
-- 每次运行的 Step Summary 包含：
-  - 构建时间
-  - PyTorch Nightly 版本
-  - Ascend/pytorch commit（带链接）
-  - 已应用 patch 列表
-  - ccache 命中状态与命中率
-  - 构建结果
-- 构建失败时可下载 `build-log-{run_number}` artifact 查看详细编译错误
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-### 结果判读要点
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-- `Build torch_npu wheel` 成功且出现 `Build succeeded: dist/*.whl`，说明核心编译成功。
-- 如果同一 step 最后报 `Unable to process file command 'output'` / `Invalid format`，通常是 workflow 输出写法错误（`$GITHUB_OUTPUT` 格式）而非编译错误。
-- `ccache` 首次冷启动命中率低属正常；第二次开始命中率应显著提升。
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build \
+            gcc g++ \
+            git \
+            patchelf \
+            ccache
 
-## 手动触发
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-
+            ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
 
-在 Actions 页面点击 **Run workflow**，可选填 PyTorch nightly 日期（格式 `YYYYMMDD`），留空使用最新版。
+      - name: Install PyTorch nightly (CPU, x86_64)
+        id: install_torch
+        run: |
+          pip install --upgrade pip
+          if [ -n "${{ github.event.inputs.torch_nightly_date }}" ]; then
+            DATE="${{ github.event.inputs.torch_nightly_date }}"
+            pip install --pre \
+              "torch==2.11.0.dev${DATE}" \
+              --index-url https://download.pytorch.org/whl/nightly/cpu
+          else
+            pip install --pre torch \
+              --index-url https://download.pytorch.org/whl/nightly/cpu
+          fi
+          TORCH_VER=$(python -c "import torch; print(torch.__version__)")
+          echo "version=${TORCH_VER}" >> $GITHUB_OUTPUT
+          echo "PyTorch nightly version: ${TORCH_VER}"
+
+      - name: Clone Ascend/pytorch (with submodules)
+        id: clone_repo
+        run: |
+          git clone --depth=1 --recurse-submodules \
+            https://github.com/Ascend/pytorch.git ascend_pytorch
+          cd ascend_pytorch
+          COMMIT=$(git rev-parse HEAD)
+          COMMIT_SHORT=$(git rev-parse --short HEAD)
+          COMMIT_DATE=$(git log -1 --format='%ci')
+          echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
+          echo "commit_short=${COMMIT_SHORT}" >> $GITHUB_OUTPUT
+          echo "commit_date=${COMMIT_DATE}" >> $GITHUB_OUTPUT
+          echo "Ascend/pytorch commit: ${COMMIT} (${COMMIT_DATE})"
+
+      - name: Install Python build dependencies
+        run: |
+          cd ascend_pytorch
+          pip install pyyaml setuptools auditwheel
+
+      - name: Apply compatibility patches
+        id: patch
+        run: |
+          PATCH_DIR="${GITHUB_WORKSPACE}/patches"
+          PATCH_APPLIED=""
+          PATCH_FAILED=""
+          for p in "${PATCH_DIR}"/*.patch; do
+            [ -f "$p" ] || continue
+            echo "Applying patch: $(basename $p)"
+            if git apply --directory=ascend_pytorch "$p"; then
+              echo "  ✅ OK"
+              PATCH_APPLIED="${PATCH_APPLIED} $(basename $p)"
+            else
+              echo "  ❌ FAILED (may already be merged upstream)"
+              PATCH_FAILED="${PATCH_FAILED} $(basename $p)"
+            fi
+          done
+          echo "applied=${PATCH_APPLIED}" >> $GITHUB_OUTPUT
+          echo "failed=${PATCH_FAILED}"   >> $GITHUB_OUTPUT
+
+      - name: Build torch_npu wheel
+        id: build
+        run: |
+          cd ascend_pytorch
+          mkdir -p ~/.ccache
+          ccache -M 2G
+          ccache -z || true
+          export CC="ccache gcc"
+          export CXX="ccache g++"
+          export CCACHE_BASEDIR="${PWD}"
+          export CCACHE_DIR="${HOME}/.ccache"
+          export CCACHE_COMPRESS=1
+          export CCACHE_MAXSIZE=2G
+          export DISABLE_INSTALL_TORCHAIR=FALSE
+          export BUILD_WITHOUT_SHA=1
+          python setup.py build bdist_wheel 2>&1 | tee /tmp/build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          CCACHE_HIT_RATE=$(ccache -s | awk -F'[()]' '/Hits:/ {print $2; exit}')
+          [ -n "${CCACHE_HIT_RATE}" ] || CCACHE_HIT_RATE="N/A"
+          echo "hit_rate=${CCACHE_HIT_RATE}" >> $GITHUB_OUTPUT
+          ccache -s || true
+          echo "status=${BUILD_STATUS}" >> $GITHUB_OUTPUT
+          if [ ${BUILD_STATUS} -eq 0 ]; then
+            WHL=$(ls dist/*.whl 2>/dev/null | head -1)
+            echo "wheel=${WHL}" >> $GITHUB_OUTPUT
+            echo "Build succeeded: ${WHL}"
+          fi
+          exit ${BUILD_STATUS}
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: /tmp/build.log
+          if-no-files-found: warn
+
+      - name: Upload wheel
+        if: steps.build.outputs.status == '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: torch_npu-wheel-${{ github.run_number }}
+          path: ascend_pytorch/dist/*.whl
+          if-no-files-found: warn
+
+      - name: Build summary
+        if: always()
+        run: |
+          BUILD_STATUS="${{ steps.build.outputs.status }}"
+          if [ "${BUILD_STATUS}" = "0" ]; then
+            STATUS_ICON="✅ SUCCESS"
+          else
+            STATUS_ICON="❌ FAILED"
+          fi
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## Ascend/pytorch Nightly Build Validation
+
+          | 项目 | 详情 |
+          |------|------|
+          | 构建时间 | $(date -u '+%Y-%m-%d %H:%M UTC') |
+          | PyTorch Nightly | \`${{ steps.install_torch.outputs.version }}\` |
+          | Ascend/pytorch Commit | [\`${{ steps.clone_repo.outputs.commit_short }}\`](https://github.com/Ascend/pytorch/commit/${{ steps.clone_repo.outputs.commit }}) |
+          | Commit 时间 | ${{ steps.clone_repo.outputs.commit_date }} |
+          | 已应用 Patch | ${{ steps.patch.outputs.applied || '(无)' }} |
+          | ccache 命中 | ${{ steps.ccache-restore.outputs.cache-hit == 'true' && '命中' || '未命中' }} |
+          | ccache 命中率 | ${{ steps.build.outputs.hit_rate || 'N/A' }} |
+          | 构建结果 | ${STATUS_ICON} |
+
+          $( [ "${BUILD_STATUS}" = "0" ] && echo "> Wheel: \`${{ steps.build.outputs.wheel }}\`" || echo "> 查看 build-log artifact 获取详细错误信息" )
+          EOF
+```
 
 ---
 
-## 问题处理（Claude Code Skills）
+## 配置项详解
 
-本仓库内置三个 Claude Code slash commands，覆盖从检测到修复的完整闭环。在项目目录下启动 Claude Code 后即可使用。
+### 触发条件
 
-### 典型工作流
+| 触发方式 | 说明 |
+|----------|------|
+| `schedule` | 每天 UTC 02:00 自动触发 |
+| `workflow_dispatch` | 手动触发，可指定 PyTorch nightly 日期 |
+| `push` | workflow 文件、patches 目录、AGENTS.md 变更时触发 |
 
-```
-CI 构建失败
-  │
-  ├─ /analyze-failure   ← 拉取日志、定位根因、对比 PyTorch 新旧 API
-  │
-  ├─ /report-issue      ← 按日期编号创建 issues/ 文档
-  │
-  └─ /gen-patch         ← 修改源码、生成 patch、提交、触发验证
-                               │
-                        下次构建推进更远？
-                          ├─ 是 → 继续 /analyze-failure 处理下一个问题
-                          └─ 否 → 检查 patch 是否正确应用
+### 环境变量
+
+```yaml
+env:
+  PYTHON_VERSION: '3.11'  # Python 版本，需与 setup-python step 一致
 ```
 
----
+### 系统依赖
 
-### `/analyze-failure` — 分析 CI 失败原因
-
-CI 变红后的第一步。执行内容：
-
-1. `gh run list` 找到最新失败 Run
-2. `gh run view --log-failed` 拉取失败日志
-3. 过滤 `error:`、`make[2]`、`Traceback` 等关键行
-4. 读取受影响的 Ascend/pytorch 源文件
-5. 在 PyTorch nightly 头文件（`/usr/local/lib/python3.11/dist-packages/torch/include/`）中查找变更后的 API 定义
-6. 输出结构化报告：已生效 patch、错误摘要、根本原因、受影响范围、建议修复方向
-
-```
-/analyze-failure
-```
-
-**关键观察**：构建运行时长比上次更长 → 前序 patch 已生效，本次暴露新问题。
-
-**新增观察（重要）**：先区分"真实编译失败"与"CI 脚本失败"：
-- 编译失败：`error:` / `make[2]: ***` / `FAILED` 等 C/C++ 错误
-- 脚本失败：`Unable to process file command 'output'`、`Invalid format`、`set-output`/`GITHUB_OUTPUT` 相关报错
-
----
-
-### `/report-issue` — 创建 issue 记录
-
-在 `/analyze-failure` 完成后使用。按 `YYYY-MM-DD-NNN` 规则编号，在 `issues/` 下创建 Markdown 文档，记录：问题描述、根本原因分析（含错误日志）、修复方案、对应 patch 文件名、前置 patch（如有）。
-
-```
-/report-issue
-```
-
-示例：`issues/2026-03-07-001-CachingHostAllocator-HostBlockPool-api-break.md`
-
----
-
-### `/gen-patch` — 生成 patch 并触发验证
-
-执行内容：
-
-1. 确认本地克隆（`/tmp/ascend_pytorch` 或类似路径）可用
-2. 对比新旧 API，按最小改动原则修改受影响源文件
-3. `git diff <文件> > patches/NNNN-fix-<模块>-<描述>.patch` 生成 patch
-4. 提交 patch + issue 文档并 push
-5. `gh workflow run` 触发新一轮构建
-6. 观察构建进度判断 patch 是否生效
-
-```
-/gen-patch
-```
-
-示例：`patches/0002-fix-NPUSHMEMSymmetricMemory-GroupInfo-api-compat.patch`
-
-**常见修复模式：**
-
-| 错误类型 | 修复方式 |
-|----------|----------|
-| 结构体成员被删除（原用于缓存） | `.cpp` 模块级引入 `static map + mutex` 替代 |
-| 成员重命名（如 `blocks` → `blocks_`） | 重命名 Ascend 侧冲突的同名类型，消除 typedef 遮蔽 |
-| 基类新增纯虚函数 | 子类 `.hpp` 中补充 override（无对应语义则返回 0） |
-| 虚函数签名新增参数 | 更新 override 签名，原逻辑提取为私有方法 |
-
----
-
-### Patch 生命周期
-
-```
-新增 patch → CI 自动应用（git apply --directory=ascend_pytorch）
-                │
-     apply 成功 ✅ → 构建推进，问题修复
-     apply 失败 ❌ → 上游已合入该修复 → 删除 patch 文件并提交
-```
-
-> Patch 打在 CI 临时克隆的副本上，**不修改 Ascend/pytorch 官方仓库**。
-
----
-
-## Workflow 最佳实践
+必须安装的依赖：
+- `cmake`, `ninja-build` - 构建工具
+- `gcc`, `g++` - 编译器
+- `git` - 版本控制
+- `patchelf` - 修改 ELF 文件
+- `ccache` - 编译缓存
 
 ### ccache 配置
+
+**关键点**：
+1. 使用 `cache/restore` + `cache/save` 分离模式
+2. Key 格式：`ccache-{os}-py{ver}-{ref}-{run_id}`
+3. `if: always()` 确保 always 保存缓存
+
+```yaml
+# 恢复缓存
+- name: Restore ccache
+  uses: actions/cache/restore@v4
+  with:
+    path: ~/.ccache
+    key: ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-${{ github.run_id }}
+    restore-keys: |
+      ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-
+      ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
+
+# 保存缓存
+- name: Save ccache
+  if: always()
+  uses: actions/cache/save@v4
+  with:
+    path: ~/.ccache
+    key: ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-${{ github.run_id }}
+```
+
+### PyTorch 安装
+
+```bash
+# 指定日期版本
+pip install --pre "torch==2.11.0.dev${DATE}" --index-url https://download.pytorch.org/whl/nightly/cpu
+
+# 最新版本
+pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
+```
+
+### 克隆仓库
+
+```bash
+git clone --depth=1 --recurse-submodules https://github.com/Ascend/pytorch.git ascend_pytorch
+```
+
+**参数说明**：
+- `--depth=1` - 浅克隆，节省时间
+- `--recurse-submodules` - 递归克隆子模块
+
+### Patch 应用
+
+**正确方式**：
+```bash
+git apply --directory=ascend_pytorch "$patch"
+```
+
+**错误方式**：
+```bash
+cd ascend_pytorch && git apply "$patch"  # ❌ 路径解析错误
+```
+
+### 构建环境变量
 
 ```bash
 export CC="ccache gcc"
 export CXX="ccache g++"
-export CCACHE_BASEDIR="${PWD}"
+export CCACHE_BASEDIR="${PWD}"      # 路径规范化，提高命中率
 export CCACHE_DIR="${HOME}/.ccache"
-export CCACHE_COMPRESS=1
+export CCACHE_COMPRESS=1            # 压缩缓存
 export CCACHE_MAXSIZE=2G
-```
-
-### Patch 应用方式
-
-```bash
-# 正确方式：使用 --directory 参数
-git apply --directory=ascend_pytorch "$patch"
-
-# 错误方式：cd 后再 apply（会导致路径解析错误）
-cd ascend_pytorch && git apply "$patch"  # ❌
+export DISABLE_INSTALL_TORCHAIR=FALSE  # 启用 torchair
+export BUILD_WITHOUT_SHA=1              # 可复现构建
 ```
 
 ### GITHUB_OUTPUT 写法
@@ -187,16 +309,67 @@ echo "version=${TORCH_VER}" >> $GITHUB_OUTPUT
 echo "logs=$(cat build.log)" >> $GITHUB_OUTPUT  # ❌
 ```
 
-### 缓存 Key 策略
+---
 
-```yaml
-key: ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-${{ github.run_id }}
-restore-keys: |
-  ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-
-  ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
+## 常见问题修复
+
+### Patch 应用失败
+
+**错误**：`error: ascend_pytorch/torch_npu/...: No such file or directory`
+
+**原因**：在 `ascend_pytorch` 目录内执行 `git apply`
+
+**修复**：使用 `--directory` 参数
+```bash
+git apply --directory=ascend_pytorch "$patch"
 ```
 
-使用 `cache/restore` + `cache/save` 分离模式，确保 `always()` 时也能保存缓存。
+### ccache 命中率低
+
+**检查项**：
+1. `CCACHE_BASEDIR` 是否设置
+2. 缓存 key 是否正确恢复
+3. `cache/save` 是否在 `always()` 条件下执行
+
+### GITHUB_OUTPUT 格式错误
+
+**错误**：`Unable to process file command 'output'`
+
+**原因**：输出值包含换行符
+
+**修复**：确保输出单行值
+```bash
+# 正确
+echo "version=${TORCH_VER}" >> $GITHUB_OUTPUT
+
+# 错误
+echo "logs=$(cat build.log)" >> $GITHUB_OUTPUT
+```
+
+---
+
+## 问题处理流程
+
+### 典型工作流
+
+```
+CI 构建失败
+  │
+  ├─ /analyze-failure   ← 拉取日志、定位根因、对比 PyTorch 新旧 API
+  │
+  ├─ /report-issue      ← 按日期编号创建 issues/ 文档
+  │
+  └─ /gen-patch         ← 修改源码、生成 patch、提交、触发验证
+```
+
+### 常见修复模式
+
+| 错误类型 | 修复方式 |
+|----------|----------|
+| 结构体成员被删除 | `.cpp` 模块级引入 `static map + mutex` 替代 |
+| 成员重命名 | 重命名 Ascend 侧冲突的同名类型 |
+| 基类新增纯虚函数 | 子类补充 override（无语义则返回 0） |
+| 虚函数签名变更 | 更新 override 签名，原逻辑提取为私有方法 |
 
 ---
 
