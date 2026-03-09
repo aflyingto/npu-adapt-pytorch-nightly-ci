@@ -1,4 +1,4 @@
-# build_skills.md
+# skills/torch_npu-adapt-pytorch-nightly/SKILL.MD
 
 目标：仅根据本文件，自动生成可运行的 `.github/workflows/nightly-build.yml`，用于验证 `Ascend/pytorch` 在 PyTorch nightly 版本下的编译兼容性。
 
