@@ -1,0 +1,119 @@
+name: Build pytorch-npu (PyTorch 2.1.0+cpu)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc g++ git patchelf ccache
+
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-ubuntu22-v7.2.0-pytorch2.1.0-${{ github.run_id }}
+          restore-keys: |
+            ccache-ubuntu22-v7.2.0-pytorch2.1.0-
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=2G
+          ccache --zero-stats
+          echo "CC=ccache gcc" >> $GITHUB_ENV
+          echo "CXX=ccache g++" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.1.0+cpu --index-url https://download.pytorch.org/whl/cpu
+          pip install pyyaml setuptools auditwheel
+
+      - name: Clone Ascend/pytorch
+        run: |
+          git clone --depth=1 --branch v7.2.0-pytorch2.1.0 --recurse-submodules https://github.com/Ascend/pytorch.git ascend_pytorch
+
+      - name: Record Ascend/pytorch commit info
+        run: |
+          cd ascend_pytorch
+          echo "ASCEND_PYTORCH_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          echo "ASCEND_PYTORCH_COMMIT_SHORT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Build CANN stub libraries
+        run: |
+          bash ascend_pytorch/third_party/acl/libs/build_stub.sh
+
+      - name: Build wheel
+        id: build_wheel
+        run: |
+          set -o pipefail
+          cd ascend_pytorch
+          export DISABLE_INSTALL_TORCHAIR=TRUE
+          export DISABLE_RPC_FRAMEWORK=TRUE
+          export BUILD_WITHOUT_SHA=1
+          python setup.py build bdist_wheel 2>&1 | tee ../build.log
+          echo "build_success=true" >> $GITHUB_OUTPUT
+
+      - name: Show ccache statistics
+        if: always()
+        run: |
+          echo "## CCache Statistics" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ccache --show-stats >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload wheel artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytorch-npu-wheel
+          path: ascend_pytorch/dist/*.whl
+          retention-days: 7
+
+      - name: Upload build log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Build Information" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| PyTorch Version | 2.1.0+cpu |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ascend/pytorch Branch | v7.2.0-pytorch2.1.0 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ascend/pytorch Commit | ${{ env.ASCEND_PYTORCH_COMMIT_SHORT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.build_wheel.outputs.build_success }}" == "true" ]; then
+            echo "## Build Result: Success" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Generated Wheel Files:" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cd ascend_pytorch/dist
+            while IFS= read -r wheel; do
+              echo "- $wheel" >> $GITHUB_STEP_SUMMARY
+            done < <(ls *.whl 2>/dev/null || echo "No wheel files found")
+          else
+            echo "## Build Result: Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please check the build log artifact for details." >> $GITHUB_STEP_SUMMARY
+          fi
