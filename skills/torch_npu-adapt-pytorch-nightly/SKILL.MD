@@ -28,12 +28,13 @@
 6. 安装 PyTorch nightly：
    - 升级 pip
    - **版本格式（重要）**：`torch==${MAJOR}.dev${DATE}+cpu`
-     - `${MAJOR}`：主版本号，如 `2.11.0`
+     - `${MAJOR}`：主版本号，**不能固定**，需依次尝试：`2.12.0` → `2.11.0` → `2.10.0`
      - `${DATE}`：日期，格式 `YYYYMMDD`，如 `20260309`
      - `+cpu`：**必须包含**，表示 CPU 版本
      - 完整示例：`torch==2.11.0.dev20260309+cpu`
-   - 若指定日期：安装 `torch==2.11.0.dev${DATE}+cpu`（从 nightly/cpu 索引）
-   - 否则：安装最新 `torch --pre`（从 nightly/cpu 索引）
+   - **安装逻辑**：
+     - 若指定日期：依次尝试 `torch==2.12.0.dev${DATE}+cpu` → `torch==2.11.0.dev${DATE}+cpu` → `torch==2.10.0.dev${DATE}+cpu`，直到成功
+     - 否则：安装最新 `torch --pre`（从 nightly/cpu 索引）
    - 输出版本到 `$GITHUB_OUTPUT`
 7. 克隆 `Ascend/pytorch`：
    - 参数：`--depth=1 --recurse-submodules`
@@ -225,6 +226,11 @@ fi
    - 正确：`torch==2.11.0.dev20260309+cpu`
    - 原因：PyTorch nightly CPU 版本的包名包含 `+cpu` 后缀，缺少会导致找不到匹配的包
 
+10. **主版本号不能固定，必须依次尝试**
+    - 尝试顺序：`2.12.0` → `2.11.0` → `2.10.0`
+    - 原因：PyTorch nightly 不同日期可能对应不同主版本
+    - 实现：使用循环尝试，成功则跳出
+
 ## 9. 最小验收标准
 
 - workflow 可被 GitHub Actions 识别并触发
@@ -236,7 +242,7 @@ fi
 
 ## 10. 推荐生成提示词（给其他模型）
 
-"请严格按 `SKILL.MD` 生成 `.github/workflows/nightly-build.yml`。要求：按文档顺序组织 step，使用单一 `actions/cache@v4` 设置 ccache，使用 `$GITHUB_ENV` 设置环境变量，克隆 Ascend/pytorch master 分支，应用 `patches/` 目录下的兼容性 patch，设置 `DISABLE_INSTALL_TORCHAIR=FALSE`，**PyTorch nightly 版本格式必须为 `${MAJOR}.dev${DATE}+cpu`（如 `2.11.0.dev20260309+cpu`）**，ccache 统计作为独立 step 输出到 step summary（代码块格式），使用表格格式输出构建信息，**必须**在 Summary 中展示 `issues/` 目录下的兼容性问题分析报告（提取问题描述、根本原因分析、修复方案三个章节）。生成后输出完整 YAML。"
+"请严格按 `SKILL.MD` 生成 `.github/workflows/nightly-build.yml`。要求：按文档顺序组织 step，使用单一 `actions/cache@v4` 设置 ccache，使用 `$GITHUB_ENV` 设置环境变量，克隆 Ascend/pytorch master 分支，应用 `patches/` 目录下的兼容性 patch，设置 `DISABLE_INSTALL_TORCHAIR=FALSE`，**PyTorch nightly 版本格式必须为 `${MAJOR}.dev${DATE}+cpu`（如 `2.11.0.dev20260309+cpu`），主版本号不能固定，需依次尝试 `2.12.0` → `2.11.0` → `2.10.0` 直到成功**，ccache 统计作为独立 step 输出到 step summary（代码块格式），使用表格格式输出构建信息，**必须**在 Summary 中展示 `issues/` 目录下的兼容性问题分析报告（提取问题描述、根本原因分析、修复方案三个章节）。生成后输出完整 YAML。"
 
 ---
 
