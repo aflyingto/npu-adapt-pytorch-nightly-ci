@@ -23,49 +23,74 @@
 1. `actions/checkout@v4`
 2. `actions/setup-python@v5`，版本使用 `${{ env.PYTHON_VERSION }}`
 3. 安装系统依赖：`cmake ninja-build gcc g++ git patchelf ccache`
-4. 恢复 ccache：`actions/cache/restore@v4`
-5. 安装 PyTorch nightly：
+4. 设置 ccache：`actions/cache@v4`（或 `cache/restore`）
+5. 配置 ccache：设置 max-size、zero-stats、环境变量
+6. 安装 PyTorch nightly：
    - 升级 pip
    - 若指定日期：安装 `torch==2.11.0.dev${DATE}`（从 nightly/cpu 索引）
    - 否则：安装最新 `torch --pre`（从 nightly/cpu 索引）
    - 输出版本到 `$GITHUB_OUTPUT`
-6. 克隆 `Ascend/pytorch`：
+7. 克隆 `Ascend/pytorch`：
    - 参数：`--depth=1 --recurse-submodules`
    - 目标目录：`ascend_pytorch`
    - 记录 commit 信息（完整 hash、短 hash、日期）
-7. 安装 Python 构建依赖：`pyyaml setuptools auditwheel`
-8. 应用兼容性 patches：
+8. 安装 Python 构建依赖：`pyyaml setuptools auditwheel`
+9. 应用兼容性 patches：
    - 遍历 `patches/` 目录下所有 `.patch` 文件
    - 使用 `git apply --directory=ascend_pytorch` 应用
    - 记录成功/失败列表到 `$GITHUB_OUTPUT`
-9. 配置 ccache 环境变量
 10. 构建 wheel：`python setup.py build bdist_wheel`
-11. 保存 ccache：`actions/cache/save@v4`（`if: always()`）
+11. 显示 ccache 统计（`if: always()`）
 12. 上传构建日志 artifact（`if: always()`）
 13. 上传 wheel artifact（仅成功时）
 14. 输出构建 summary
 
 ## 4. ccache 规则
 
-- 使用 `cache/restore` + `cache/save` 分离模式
+### 缓存 Action 选择
+
+**方案一（推荐）：单一 `actions/cache@v4`**
+- 适用于：缓存 key 固定、不需要 always 保存的场景
+- 优点：配置简单，自动处理保存
+
+**方案二：分离 `cache/restore` + `cache/save`**
+- 适用于：需要 `if: always()` 保存缓存的场景
+- 优点：即使构建失败也能保存缓存
+
+### 缓存 Key 策略
+
 - 缓存路径：`~/.ccache`
-- 缓存 key：`ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-${{ github.run_id }}`
-- `restore-keys`：
-  - `ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-`
-  - `ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-`
-- 配置步骤：
-  - `ccache -M 2G`
-  - `ccache -z`（重置统计）
-  - 设置环境变量：
-    - `CC=ccache gcc`
-    - `CXX=ccache g++`
-    - `CCACHE_BASEDIR=${PWD}`
-    - `CCACHE_DIR=$HOME/.ccache`
-    - `CCACHE_COMPRESS=1`
-    - `CCACHE_MAXSIZE=2G`
-- 构建后：
-  - 提取命中率：`ccache -s | awk -F'[()]' '/Hits:/ {print $2; exit}'`
-  - 输出到 `$GITHUB_OUTPUT`
+- Key 格式：`ccache-{os}-py{python_version}-{ref_name}-{run_id}`
+- `restore-keys`（按优先级）：
+  - `ccache-{os}-py{python_version}-{ref_name}-`
+  - `ccache-{os}-py{python_version}-`
+
+### 配置步骤
+
+```bash
+ccache --max-size=2G
+ccache --zero-stats
+echo "CC=ccache gcc" >> $GITHUB_ENV
+echo "CXX=ccache g++" >> $GITHUB_ENV
+echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+```
+
+**注意**：使用 `$GITHUB_ENV` 而非 `export`，确保环境变量在后续 step 中生效。
+
+### 构建后统计输出
+
+**必须**在 `if: always()` 条件下输出 ccache 统计：
+
+```bash
+echo "## CCache Statistics" >> $GITHUB_STEP_SUMMARY
+echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+ccache --show-stats >> $GITHUB_STEP_SUMMARY
+echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+```
+
+**要求**：
+- 使用代码块格式（\`\`\`）包裹统计输出
+- 作为独立的 step，`if: always()` 确保构建失败时也能显示
 
 ## 5. 构建策略
 
@@ -106,10 +131,10 @@
    - 保证失败时也能下载日志
 
 2. wheel 上传必须仅在成功时执行
-   - 条件：`if: steps.build.outputs.status == '0'`
+   - 条件：`if: success()` 或检查构建状态
 
-3. ccache 保存必须 `if: always()`
-   - 即使构建失败也要保存缓存
+3. ccache 统计必须 `if: always()`
+   - 即使构建失败也要显示缓存统计
 
 4. Patch 应用必须使用 `--directory` 参数
    - 错误：`cd ascend_pytorch && git apply "$patch"`
@@ -120,6 +145,13 @@
 
 6. 构建状态使用 `${PIPESTATUS[0]}` 而非 `$?`
    - 因为使用了 `tee` 管道
+
+7. ccache 环境变量必须写入 `$GITHUB_ENV`
+   - 错误：`export CC="ccache gcc"`（仅在当前 shell 生效）
+   - 正确：`echo "CC=ccache gcc" >> $GITHUB_ENV`（后续 step 可用）
+
+8. ccache 统计输出使用代码块格式
+   - 使用 `\`\`\`` 包裹，确保可读性
 
 ## 9. 最小验收标准
 
@@ -132,7 +164,7 @@
 
 ## 10. 推荐生成提示词（给其他模型）
 
-"请严格按 `build_skills.md` 生成 `.github/workflows/nightly-build.yml`。要求：按文档顺序组织 step，使用 `cache/restore` + `cache/save` 分离模式，克隆 Ascend/pytorch master 分支，应用 `patches/` 目录下的兼容性 patch，设置 `DISABLE_INSTALL_TORCHAIR=FALSE`，使用表格格式输出 step summary。生成后输出完整 YAML。"
+"请严格按 `SKILL.MD` 生成 `.github/workflows/nightly-build.yml`。要求：按文档顺序组织 step，使用单一 `actions/cache@v4` 设置 ccache，使用 `$GITHUB_ENV` 设置环境变量，克隆 Ascend/pytorch master 分支，应用 `patches/` 目录下的兼容性 patch，设置 `DISABLE_INSTALL_TORCHAIR=FALSE`，ccache 统计作为独立 step 输出到 step summary（代码块格式），使用表格格式输出构建信息。生成后输出完整 YAML。"
 
 ---
 
