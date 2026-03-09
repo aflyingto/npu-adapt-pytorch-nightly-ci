@@ -64,14 +64,19 @@ jobs:
         id: install_torch
         run: |
           pip install --upgrade pip
-          if [ -n "${{ github.event.inputs.torch_nightly_date }}" ]; then
-            DATE="${{ github.event.inputs.torch_nightly_date }}"
-            pip install --pre \
-              "torch==2.11.0.dev${DATE}+cpu" \
-              --index-url https://download.pytorch.org/whl/nightly/cpu
+          DATE="${{ github.event.inputs.torch_nightly_date }}"
+          if [ -n "$DATE" ]; then
+            # 依次尝试不同主版本号
+            for MAJOR in "2.12.0" "2.11.0" "2.10.0"; do
+              VERSION="${MAJOR}.dev${DATE}+cpu"
+              echo "尝试安装 torch==${VERSION}..."
+              if pip install --pre "torch==${VERSION}" --index-url https://download.pytorch.org/whl/nightly/cpu 2>/dev/null; then
+                echo "成功安装 torch==${VERSION}"
+                break
+              fi
+            done
           else
-            pip install --pre torch \
-              --index-url https://download.pytorch.org/whl/nightly/cpu
+            pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
           fi
           TORCH_VER=$(python -c "import torch; print(torch.__version__)")
           echo "version=${TORCH_VER}" >> $GITHUB_OUTPUT
