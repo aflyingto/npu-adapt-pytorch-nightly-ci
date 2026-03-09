@@ -1,191 +1,119 @@
-name: Ascend/pytorch Nightly Build Validation
+name: Build pytorch-npu (PyTorch 2.1.0+cpu)
 
 on:
-  schedule:
-    - cron: '0 2 * * *'   # 每天 UTC 02:00（北京时间 10:00）
   workflow_dispatch:
-    inputs:
-      torch_nightly_date:
-        description: 'PyTorch nightly 日期 (格式: YYYYMMDD，留空使用最新版)'
-        required: false
-        default: ''
-  push:
-    paths:
-      - '.github/workflows/nightly-build.yml'
-      - 'patches/**'
-      - 'AGENTS.md'
-
-env:
-  PYTHON_VERSION: '3.11'
 
 jobs:
   build:
-    name: Build torch_npu (x86, PyTorch nightly)
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: "3.11"
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build \
-            gcc g++ \
-            git \
-            patchelf \
-            ccache
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc g++ git patchelf ccache
 
-      - name: Restore ccache
-        id: ccache-restore
-        uses: actions/cache/restore@v4
+      - name: Setup ccache
+        uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-${{ github.run_id }}
+          key: ccache-ubuntu22-v7.2.0-pytorch2.1.0-${{ github.run_id }}
           restore-keys: |
-            ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-
-            ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
+            ccache-ubuntu22-v7.2.0-pytorch2.1.0-
 
-      - name: Install PyTorch nightly (CPU, x86_64)
-        id: install_torch
+      - name: Configure ccache
         run: |
-          pip install --upgrade pip
-          if [ -n "${{ github.event.inputs.torch_nightly_date }}" ]; then
-            DATE="${{ github.event.inputs.torch_nightly_date }}"
-            pip install --pre \
-              "torch==2.11.0.dev${DATE}" \
-              --index-url https://download.pytorch.org/whl/nightly/cpu
-          else
-            pip install --pre torch \
-              --index-url https://download.pytorch.org/whl/nightly/cpu
-          fi
-          TORCH_VER=$(python -c "import torch; print(torch.__version__)")
-          echo "version=${TORCH_VER}" >> $GITHUB_OUTPUT
-          echo "PyTorch nightly version: ${TORCH_VER}"
+          ccache --max-size=2G
+          ccache --zero-stats
+          echo "CC=ccache gcc" >> $GITHUB_ENV
+          echo "CXX=ccache g++" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
 
-      - name: Clone Ascend/pytorch (with submodules)
-        id: clone_repo
+      - name: Install Python dependencies
         run: |
-          git clone --depth=1 --recurse-submodules \
-            https://github.com/Ascend/pytorch.git ascend_pytorch
-          cd ascend_pytorch
-          COMMIT=$(git rev-parse HEAD)
-          COMMIT_SHORT=$(git rev-parse --short HEAD)
-          COMMIT_DATE=$(git log -1 --format='%ci')
-          echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
-          echo "commit_short=${COMMIT_SHORT}" >> $GITHUB_OUTPUT
-          echo "commit_date=${COMMIT_DATE}" >> $GITHUB_OUTPUT
-          echo "Ascend/pytorch commit: ${COMMIT} (${COMMIT_DATE})"
-
-      - name: Install Python build dependencies
-        run: |
-          cd ascend_pytorch
-          # 跳过 requirements.txt 中固定的 torch 版本，使用我们安装的 nightly
+          python -m pip install --upgrade pip
+          pip install torch==2.1.0+cpu --index-url https://download.pytorch.org/whl/cpu
           pip install pyyaml setuptools auditwheel
 
-      - name: Apply compatibility patches
-        id: patch
+      - name: Clone Ascend/pytorch
         run: |
-          PATCH_DIR="${GITHUB_WORKSPACE}/patches"
-          PATCH_APPLIED=""
-          PATCH_FAILED=""
-          for p in "${PATCH_DIR}"/*.patch; do
-            [ -f "$p" ] || continue
-            echo "Applying patch: $(basename $p)"
-            if git apply --directory=ascend_pytorch "$p"; then
-              echo "  ✅ OK"
-              PATCH_APPLIED="${PATCH_APPLIED} $(basename $p)"
-            else
-              echo "  ❌ FAILED (may already be merged upstream)"
-              PATCH_FAILED="${PATCH_FAILED} $(basename $p)"
-            fi
-          done
-          echo "applied=${PATCH_APPLIED}" >> $GITHUB_OUTPUT
-          echo "failed=${PATCH_FAILED}"   >> $GITHUB_OUTPUT
+          git clone --depth=1 --branch v7.2.0-pytorch2.1.0 --recurse-submodules https://github.com/Ascend/pytorch.git ascend_pytorch
 
-      - name: Build torch_npu wheel
-        id: build
+      - name: Record Ascend/pytorch commit info
         run: |
           cd ascend_pytorch
-          mkdir -p ~/.ccache
-          ccache -M 2G
-          ccache -z || true
-          export CC="ccache gcc"
-          export CXX="ccache g++"
-          export CCACHE_BASEDIR="${PWD}"
-          export CCACHE_DIR="${HOME}/.ccache"
-          export CCACHE_COMPRESS=1
-          export CCACHE_MAXSIZE=2G
+          echo "ASCEND_PYTORCH_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          echo "ASCEND_PYTORCH_COMMIT_SHORT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-          # 默认启用 torchair 构建；RPC 使用默认构建行为（不强制禁用）
-          export DISABLE_INSTALL_TORCHAIR=FALSE
+      - name: Build CANN stub libraries
+        run: |
+          bash ascend_pytorch/third_party/acl/libs/build_stub.sh
+
+      - name: Build wheel
+        id: build_wheel
+        run: |
+          set -o pipefail
+          cd ascend_pytorch
+          export DISABLE_INSTALL_TORCHAIR=TRUE
+          export DISABLE_RPC_FRAMEWORK=TRUE
           export BUILD_WITHOUT_SHA=1
-          python setup.py build bdist_wheel 2>&1 | tee /tmp/build.log
-          BUILD_STATUS=${PIPESTATUS[0]}
-          CCACHE_HIT_RATE=$(ccache -s | awk -F'[()]' '/Hits:/ {print $2; exit}')
-          [ -n "${CCACHE_HIT_RATE}" ] || CCACHE_HIT_RATE="N/A"
-          echo "hit_rate=${CCACHE_HIT_RATE}" >> $GITHUB_OUTPUT
-          ccache -s || true
-          echo "status=${BUILD_STATUS}" >> $GITHUB_OUTPUT
-          if [ ${BUILD_STATUS} -eq 0 ]; then
-            WHL=$(ls dist/*.whl 2>/dev/null | head -1)
-            echo "wheel=${WHL}" >> $GITHUB_OUTPUT
-            echo "Build succeeded: ${WHL}"
-          fi
-          exit ${BUILD_STATUS}
+          python setup.py build bdist_wheel 2>&1 | tee ../build.log
+          echo "build_success=true" >> $GITHUB_OUTPUT
 
-      - name: Save ccache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.ccache
-          key: ccache-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ github.ref_name }}-${{ github.run_id }}
-
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-${{ github.run_number }}
-          path: /tmp/build.log
-          if-no-files-found: warn
-
-      - name: Upload wheel
-        if: steps.build.outputs.status == '0'
-        uses: actions/upload-artifact@v4
-        with:
-          name: torch_npu-wheel-${{ github.run_number }}
-          path: ascend_pytorch/dist/*.whl
-          if-no-files-found: warn
-
-      - name: Build summary
+      - name: Show ccache statistics
         if: always()
         run: |
-          BUILD_STATUS="${{ steps.build.outputs.status }}"
-          if [ "${BUILD_STATUS}" = "0" ]; then
-            STATUS_ICON="✅ SUCCESS"
+          echo "## CCache Statistics" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ccache --show-stats >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload wheel artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytorch-npu-wheel
+          path: ascend_pytorch/dist/*.whl
+          retention-days: 7
+
+      - name: Upload build log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Build Information" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| PyTorch Version | 2.1.0+cpu |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ascend/pytorch Branch | v7.2.0-pytorch2.1.0 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ascend/pytorch Commit | ${{ env.ASCEND_PYTORCH_COMMIT_SHORT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.build_wheel.outputs.build_success }}" == "true" ]; then
+            echo "## Build Result: Success" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Generated Wheel Files:" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cd ascend_pytorch/dist
+            while IFS= read -r wheel; do
+              echo "- $wheel" >> $GITHUB_STEP_SUMMARY
+            done < <(ls *.whl 2>/dev/null || echo "No wheel files found")
           else
-            STATUS_ICON="❌ FAILED"
+            echo "## Build Result: Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please check the build log artifact for details." >> $GITHUB_STEP_SUMMARY
           fi
-
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ## Ascend/pytorch Nightly Build Validation
-
-          | 项目 | 详情 |
-          |------|------|
-          | 构建时间 | $(date -u '+%Y-%m-%d %H:%M UTC') |
-          | PyTorch Nightly | \`${{ steps.install_torch.outputs.version }}\` |
-          | Ascend/pytorch Commit | [\`${{ steps.clone_repo.outputs.commit_short }}\`](https://github.com/Ascend/pytorch/commit/${{ steps.clone_repo.outputs.commit }}) |
-          | Commit 时间 | ${{ steps.clone_repo.outputs.commit_date }} |
-          | 已应用 Patch | ${{ steps.patch.outputs.applied || '(无)' }} |
-          | ccache 命中 | ${{ steps.ccache-restore.outputs.cache-hit == 'true' && '命中' || '未命中' }} |
-          | ccache 命中率 | ${{ steps.build.outputs.hit_rate || 'N/A' }} |
-          | 构建结果 | ${STATUS_ICON} |
-
-          $( [ "${BUILD_STATUS}" = "0" ] && echo "> Wheel: \`${{ steps.build.outputs.wheel }}\`" || echo "> 查看 build-log artifact 获取详细错误信息" )
-          EOF
