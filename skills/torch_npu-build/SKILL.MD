@@ -1,10 +1,10 @@
 # torch_npu-build
 
-目标：仅根据本文件，自动生成可运行的 `.github/workflows/nightly-build.yml`，用于构建 `Ascend/pytorch` 的 wheel 包。使用稳定版本的pytorch；
+目标：仅根据本文件，自动生成可运行的 `.github/workflows/torch_npu-build.yml`，用于构建 `Ascend/pytorch` 的 wheel 包。使用稳定版本的pytorch；
 
 ## 1. 输出文件与触发
 
-- 输出文件路径：`.github/workflows/nightly-build.yml`
+- 输出文件路径：`.github/workflows/torch_npu-build.yml`
 - workflow 名称：`Build pytorch-npu (PyTorch 2.1.0+cpu)`
 - 触发方式：
   - 手动：`workflow_dispatch`
@@ -97,5 +97,5 @@
 
 ## 9. 推荐生成提示词（给其他模型）
 
-"请严格按 `build_skills.md` 生成 `.github/workflows/nightly-build.yml`。  
+"请严格按 `build_skills.md` 生成 `.github/workflows/torch_npu-build.yml`。  
 要求：按文档顺序组织 step，使用 `actions/cache@v4` 单一缓存 action，克隆 `v7.2.0-pytorch2.1.0` 分支，构建 CANN stub 库，设置 `DISABLE_INSTALL_TORCHAIR=TRUE` 和 `DISABLE_RPC_FRAMEWORK=TRUE`，使用表格格式输出 step summary。生成后输出完整 YAML。"
