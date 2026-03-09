@@ -27,7 +27,12 @@
 5. 配置 ccache：设置 max-size、zero-stats、环境变量
 6. 安装 PyTorch nightly：
    - 升级 pip
-   - 若指定日期：安装 `torch==2.11.0.dev${DATE}`（从 nightly/cpu 索引）
+   - **版本格式（重要）**：`torch==${MAJOR}.dev${DATE}+cpu`
+     - `${MAJOR}`：主版本号，如 `2.11.0`
+     - `${DATE}`：日期，格式 `YYYYMMDD`，如 `20260309`
+     - `+cpu`：**必须包含**，表示 CPU 版本
+     - 完整示例：`torch==2.11.0.dev20260309+cpu`
+   - 若指定日期：安装 `torch==2.11.0.dev${DATE}+cpu`（从 nightly/cpu 索引）
    - 否则：安装最新 `torch --pre`（从 nightly/cpu 索引）
    - 输出版本到 `$GITHUB_OUTPUT`
 7. 克隆 `Ascend/pytorch`：
@@ -215,6 +220,11 @@ fi
 8. ccache 统计输出使用代码块格式
    - 使用 `\`\`\`` 包裹，确保可读性
 
+9. **PyTorch nightly 版本格式必须包含 `+cpu` 后缀**
+   - 错误：`torch==2.11.0.dev20260309`（缺少 `+cpu`）
+   - 正确：`torch==2.11.0.dev20260309+cpu`
+   - 原因：PyTorch nightly CPU 版本的包名包含 `+cpu` 后缀，缺少会导致找不到匹配的包
+
 ## 9. 最小验收标准
 
 - workflow 可被 GitHub Actions 识别并触发
@@ -226,7 +236,7 @@ fi
 
 ## 10. 推荐生成提示词（给其他模型）
 
-"请严格按 `SKILL.MD` 生成 `.github/workflows/nightly-build.yml`。要求：按文档顺序组织 step，使用单一 `actions/cache@v4` 设置 ccache，使用 `$GITHUB_ENV` 设置环境变量，克隆 Ascend/pytorch master 分支，应用 `patches/` 目录下的兼容性 patch，设置 `DISABLE_INSTALL_TORCHAIR=FALSE`，ccache 统计作为独立 step 输出到 step summary（代码块格式），使用表格格式输出构建信息，**必须**在 Summary 中展示 `issues/` 目录下的兼容性问题分析报告（提取问题描述、根本原因分析、修复方案三个章节）。生成后输出完整 YAML。"
+"请严格按 `SKILL.MD` 生成 `.github/workflows/nightly-build.yml`。要求：按文档顺序组织 step，使用单一 `actions/cache@v4` 设置 ccache，使用 `$GITHUB_ENV` 设置环境变量，克隆 Ascend/pytorch master 分支，应用 `patches/` 目录下的兼容性 patch，设置 `DISABLE_INSTALL_TORCHAIR=FALSE`，**PyTorch nightly 版本格式必须为 `${MAJOR}.dev${DATE}+cpu`（如 `2.11.0.dev20260309+cpu`）**，ccache 统计作为独立 step 输出到 step summary（代码块格式），使用表格格式输出构建信息，**必须**在 Summary 中展示 `issues/` 目录下的兼容性问题分析报告（提取问题描述、根本原因分析、修复方案三个章节）。生成后输出完整 YAML。"
 
 ---
 
